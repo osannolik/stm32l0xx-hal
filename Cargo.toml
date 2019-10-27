@@ -26,6 +26,9 @@ version = "0.4.0"
 [package.metadata.docs.rs]
 features = ["stm32l0x1", "rt"]
 
+[patch.crates-io]
+embedded-hal = { git = "https://github.com/osannolik/embedded-hal", branch = "tristate", features = ["unproven"] }
+
 [dependencies]
 as-slice = "0.1.0"
 embedded-hal = { version = "0.2.3", features = ["unproven"] }
