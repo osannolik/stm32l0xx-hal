@@ -41,6 +41,9 @@ pub struct Output<MODE> {
 /// Push pull output (type state)
 pub struct PushPull;
 
+/// Tri-state output (low, high or floating)
+pub struct TriState;
+
 /// GPIO Pin speed selection
 pub enum Speed {
     Low = 0,
@@ -92,12 +95,14 @@ macro_rules! gpio {
         pub mod $gpiox {
             use core::marker::PhantomData;
 
-            use crate::hal::digital::v2::{toggleable, InputPin, OutputPin, StatefulOutputPin};
+            use crate::hal::digital::v2::{
+                toggleable, InputPin, OutputPin, StatefulOutputPin, TriStatePin, PinState
+            };
             use crate::pac::$GPIOX;
             use crate::rcc::Rcc;
             use super::{
                 Floating, GpioExt, Input, OpenDrain, Output, Speed,
-                PullDown, PullUp, PushPull, AltMode, Analog, Port
+                TriState, PullDown, PullUp, PushPull, AltMode, Analog, Port
             };
 
             /// GPIO parts
@@ -191,6 +196,55 @@ macro_rules! gpio {
                     // NOTE(unsafe) atomic read with no side effects
                     let is_low = unsafe { (*$GPIOX::ptr()).idr.read().bits() & (1 << self.i) == 0 };
                     Ok(is_low)
+                }
+            }
+
+            impl TriStatePin for $PXx<TriState> {
+                type Error = ();
+
+                fn set(&mut self, state: PinState) -> Result<(), ()> {
+                    let offset = 2 * self.i;
+                    match state {
+                        PinState::Floating => {
+                            unsafe {
+                                &(*$GPIOX::ptr()).moder.modify(|r, w| {
+                                    w.bits((r.bits() & !(0b11 << offset)) | (0b00 << offset))
+                                });
+                            };
+                        }
+                        PinState::Low | PinState::High => {
+                            let sub = if state == PinState::Low { 16 } else { 0 };
+                            unsafe {
+                                (*$GPIOX::ptr()).bsrr.write(|w| w.bits(1 << (self.i + sub)));
+                                &(*$GPIOX::ptr()).otyper.modify(|r, w| {
+                                    w.bits(r.bits() & !(0b1 << self.i))
+                                });
+                                &(*$GPIOX::ptr()).moder.modify(|r, w| {
+                                    w.bits((r.bits() & !(0b11 << offset)) | (0b01 << offset))
+                                });
+                            };
+                        }
+                    }
+                    Ok(())
+                }
+
+                fn state(&self) -> Result<PinState, ()> {
+                    let offset = 2 * self.i;
+                    // NOTE(unsafe) atomic read with no side effects
+                    let is_input = unsafe {
+                        (*$GPIOX::ptr()).moder.read().bits() & (0b11 << offset) == 0
+                    };
+
+                    if is_input {
+                        Ok(PinState::Floating)
+                    } else {
+                        // NOTE(unsafe) atomic read with no side effects
+                        let is_set_low = unsafe {
+                            (*$GPIOX::ptr()).odr.read().bits() & (1 << self.i) == 0
+                        };
+
+                        Ok(if is_set_low { PinState::Low } else { PinState::High })
+                    }
                 }
             }
 
@@ -329,6 +383,26 @@ macro_rules! gpio {
                         }
                     }
 
+                    /// Configures the pin to operate as a tri-state pin
+                    pub fn into_tristate_output(
+                        self,
+                    ) -> $PXi<TriState> {
+                        let offset = 2 * $i;
+                        unsafe {
+                            &(*$GPIOX::ptr()).moder.modify(|r, w| {
+                                w.bits((r.bits() & !(0b11 << offset)) | (0b00 << offset))
+                            });
+                            &(*$GPIOX::ptr()).pupdr.modify(|r, w| {
+                                w.bits((r.bits() & !(0b11 << offset)) | (0b00 << offset))
+                            });
+                        };
+                        $PXi {
+                             i: $i,
+                            port: Port::$PXx,
+                            _mode: PhantomData
+                        }
+                    }
+
                     /// Set pin speed
                     pub fn set_speed(self, speed: Speed) -> Self {
                         let offset = 2 * $i;
@@ -369,6 +443,69 @@ macro_rules! gpio {
                     /// This is useful when you want to collect the pins into an array where you
                     /// need all the elements to have the same type
                     pub fn downgrade(self) -> $PXx<Output<MODE>> {
+                        $PXx {
+                            i: $i,
+                            port: Port::$PXx,
+                            _mode: self._mode,
+                        }
+                    }
+                }
+
+                impl TriStatePin for $PXi<TriState> {
+                    type Error = ();
+
+                    fn set(&mut self, state: PinState) -> Result<(), ()> {
+                        let offset = 2 * $i;
+                        match state {
+                            PinState::Floating => {
+                                unsafe {
+                                    &(*$GPIOX::ptr()).moder.modify(|r, w| {
+                                        w.bits((r.bits() & !(0b11 << offset)) | (0b00 << offset))
+                                    });
+                                };
+                            }
+                            PinState::Low | PinState::High => {
+                                let sub = if state == PinState::Low { 16 } else { 0 };
+                                unsafe {
+                                    (*$GPIOX::ptr()).bsrr.write(|w| w.bits(1 << ($i + sub)));
+                                    &(*$GPIOX::ptr()).otyper.modify(|r, w| {
+                                        w.bits(r.bits() & !(0b1 << $i))
+                                    });
+                                    &(*$GPIOX::ptr()).moder.modify(|r, w| {
+                                        w.bits((r.bits() & !(0b11 << offset)) | (0b01 << offset))
+                                    });
+                                };
+                            }
+                        }
+                        Ok(())
+                    }
+
+                    fn state(&self) -> Result<PinState, ()> {
+                        let offset = 2 * $i;
+                        // NOTE(unsafe) atomic read with no side effects
+                        let is_input = unsafe {
+                            (*$GPIOX::ptr()).moder.read().bits() & (0b11 << offset) == 0
+                        };
+
+                        if is_input {
+                            Ok(PinState::Floating)
+                        } else {
+                            // NOTE(unsafe) atomic read with no side effects
+                            let is_set_low = unsafe {
+                                (*$GPIOX::ptr()).odr.read().bits() & (1 << $i) == 0
+                            };
+
+                            Ok(if is_set_low { PinState::Low } else { PinState::High })
+                        }
+                    }
+                }
+
+                impl $PXi<TriState> {
+                    /// Erases the pin number from the type
+                    ///
+                    /// This is useful when you want to collect the pins into an array where you
+                    /// need all the elements to have the same type
+                    pub fn downgrade(self) -> $PXx<TriState> {
                         $PXx {
                             i: $i,
                             port: Port::$PXx,
