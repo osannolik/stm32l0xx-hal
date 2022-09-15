@@ -2,6 +2,7 @@
 
 use core::marker::PhantomData;
 
+use crate::hal::digital::v2::PinState;
 use crate::rcc::Rcc;
 
 /// Extension trait to split a GPIO peripheral in independent pins and registers
@@ -40,6 +41,18 @@ pub struct Output<MODE> {
 
 /// Push pull output (type state)
 pub struct PushPull;
+
+pub struct Dynamic;
+
+pub trait DynamicPin {
+    fn to_output<M>(&mut self, state: PinState) -> Result<(), void::Void>
+    where
+        Output<M>: PinMode;
+
+    fn to_input<M>(&self) -> Result<bool, void::Void>
+    where
+        Input<M>: PinMode;
+}
 
 mod sealed {
     pub trait Sealed {}
@@ -97,6 +110,33 @@ impl PinMode for Output<PushPull> {
     const MODER: u8 = 0b01;
     const OTYPER: Option<u8> = Some(0b0);
 }
+/*
+/// Tracks the current pin state for dynamic pins
+pub enum Dynamic {
+    InputFloating,
+    InputPullUp,
+    InputPullDown,
+    OutputPushPull,
+    OutputOpenDrain,
+}
+
+impl Dynamic {
+    fn is_input(&self) -> bool {
+        use Dynamic::*;
+        match self {
+            InputFloating | InputPullUp | InputPullDown | OutputOpenDrain => true,
+            OutputPushPull => false,
+        }
+    }
+    fn is_output(&self) -> bool {
+        use Dynamic::*;
+        match self {
+            InputFloating | InputPullUp | InputPullDown => false,
+            OutputPushPull | OutputOpenDrain => true,
+        }
+    }
+}
+ */
 
 /// GPIO Pin speed selection
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -137,13 +177,13 @@ macro_rules! gpio {
         pub mod $gpiox {
             use core::marker::PhantomData;
 
-            use crate::hal::digital::v2::{toggleable, InputPin, OutputPin, StatefulOutputPin};
+            use crate::hal::digital::v2::{toggleable, InputPin, OutputPin, StatefulOutputPin, IoPin, PinState};
             use crate::pac::$GPIOX;
             use crate::rcc::Rcc;
             use super::{
                 Floating, GpioExt, Input, OpenDrain, Output, Speed,
                 PullDown, PullUp, PushPull, AltMode, Analog, Port,
-                PinMode,
+                PinMode, Dynamic, DynamicPin,
             };
 
             /// GPIO parts
@@ -276,6 +316,131 @@ macro_rules! gpio {
                     }
                 }
 
+                impl<M,N> IoPin<$PXi<Input<M>>,$PXi<Output<N>>> for $PXi<Input<M>>
+                    where
+                        Input<M>: PinMode,
+                        Output<N>: PinMode,
+                {
+                    type Error = void::Void;
+
+                    fn into_input_pin(self) -> Result<$PXi<Input<M>>, Self::Error> {
+                        Ok(self)
+                    }
+
+                    fn into_output_pin(self, state: PinState) -> Result<$PXi<Output<N>>, Self::Error> {
+                        let mut pin = $PXi {
+                            _mode: PhantomData
+                        };
+
+                        pin.mode::<Output<N>>();
+
+                        pin.set_state(state)?;
+
+                        Ok(pin)
+                    }
+                }
+
+                impl<M,N> IoPin<$PXi<Input<M>>,$PXi<Output<N>>> for $PXi<Output<N>>
+                    where
+                        Input<M>: PinMode,
+                        Output<N>: PinMode,
+                {
+                    type Error = void::Void;
+
+                    fn into_input_pin(self) -> Result<$PXi<Input<M>>, Self::Error> {
+                        let mut pin = $PXi {
+                            _mode: PhantomData
+                        };
+
+                        pin.mode::<Input<M>>();
+
+                        Ok(pin)
+                    }
+
+                    fn into_output_pin(mut self, state: PinState) -> Result<$PXi<Output<N>>, Self::Error> {
+                        self.set_state(state)?;
+                        Ok(self)
+                    }
+                }
+
+                impl DynamicPin for $PXi<Dynamic> {
+                    fn to_output<M>(&mut self, state: PinState) -> Result<(), void::Void>
+                    where
+                        Output<M>: PinMode,
+                    {
+                        let mut p = $PXi::<Output<M>> {
+                            _mode: PhantomData
+                        };
+                        p.mode::<Output<M>>();
+                        p.set_state(state)
+                    }
+
+                    fn to_input<M>(&self) -> Result<bool, void::Void>
+                    where
+                        Input<M>: PinMode,
+                    {
+                        let mut p = $PXi::<Input<M>> {
+                            _mode: PhantomData
+                        };
+                        p.mode::<Input<M>>();
+                        p.is_high()
+                    }
+                }
+/*
+                impl $PXi<Dynamic> {
+                    pub fn to_output<M>(&mut self, state: PinState) -> Result<(), void::Void>
+                    where
+                        Output<M>: PinMode,
+                    {
+                        let mut p = $PXi::<Output<M>> {
+                            _mode: PhantomData
+                        };
+                        p.mode::<Output<M>>();
+                        p.set_state(state)
+                    }
+
+                    pub fn to_input<M>(&self) -> Result<bool, void::Void>
+                    where
+                        Input<M>: PinMode,
+                    {
+                        let mut p = $PXi::<Input<M>> {
+                            _mode: PhantomData
+                        };
+                        p.mode::<Input<M>>();
+                        p.is_high()
+                    }
+                }
+
+                impl OutputPin for $PXi<Dynamic>
+                {
+                    type Error = void::Void;
+
+                    fn set_high(&mut self) -> Result<(), Self::Error> {
+                        self.as_output::<M>(PinState::High);
+                        Ok(())
+                    }
+
+                    fn set_low(&mut self) -> Result<(), Self::Error> {
+                        self.as_output::<M>(PinState::Low);
+                        Ok(())
+                    }
+                }
+
+                impl InputPin for $PXi<Dynamic> {
+                    type Error = void::Void;
+
+                    fn is_high(&self) -> Result<bool, Self::Error> {
+                        let is_high = !self.is_low()?;
+                        Ok(is_high)
+                    }
+
+                    fn is_low(&self) -> Result<bool, Self::Error> {
+                        Ok(self.as_input())
+                    }
+                }
+
+ */
+
                 impl<MODE: PinMode> $PXi<MODE> {
                     /// Puts `self` into mode `M`.
                     ///
@@ -329,6 +494,16 @@ macro_rules! gpio {
                         };
 
                         f(&mut witness)
+                    }
+
+                    /// Configures the pin to operate as reconfigurable input/output
+                    pub fn into_dynamic(
+                        mut self,
+                    ) -> $PXi<Dynamic> {
+                        self.mode::<Analog>();
+                        $PXi {
+                            _mode: PhantomData
+                        }
                     }
 
                     /// Configures the pin to operate as a floating input pin.

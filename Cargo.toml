@@ -42,7 +42,7 @@ version = "0.2.2"
 default-features = false
 
 [dependencies.embedded-hal]
-version = "0.2.3"
+version = "0.2.6"
 features = ["unproven"]
 
 [dependencies.stm32-usbd]
